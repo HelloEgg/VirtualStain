@@ -371,11 +371,8 @@ class ConfidenceTestOptions(TestOptions):
 
     def initialize(self, parser):
         parser = super().initialize(parser)
-        # Add confidence-specific options
-        parser.add_argument('--confidence_threshold', type=float, default=0.5,
-                            help='Threshold for low-confidence masking')
-        parser.add_argument('--num_latent_samples', type=int, default=1,
-                            help='Number of latent samples for confidence estimation')
+        # Add inference-specific options (not already in model)
+        # Note: confidence_threshold, num_latent_samples are defined in ConfidenceModel
         parser.add_argument('--save_confidence_overlay', action='store_true',
                             help='Save images with confidence overlay')
         parser.add_argument('--confidence_patch_size', type=int, default=64,
