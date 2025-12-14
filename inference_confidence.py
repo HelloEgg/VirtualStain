@@ -63,6 +63,165 @@ def save_confidence_map(conf_map: torch.Tensor, path: str, colormap: str = 'RdYl
     Image.fromarray(colored).save(path)
 
 
+def compute_error_map(pred: torch.Tensor, target: torch.Tensor, mode: str = 'l1') -> torch.Tensor:
+    """
+    Compute pixel-wise error between prediction and target.
+
+    Args:
+        pred: Predicted image [B, C, H, W]
+        target: Target image [B, C, H, W]
+        mode: 'l1', 'l2', or 'ssim'
+
+    Returns:
+        Error map [B, 1, H, W] where higher = more error
+    """
+    if mode == 'l1':
+        error = torch.abs(pred - target).mean(dim=1, keepdim=True)
+    elif mode == 'l2':
+        error = ((pred - target) ** 2).mean(dim=1, keepdim=True)
+        error = torch.sqrt(error)
+    else:
+        error = torch.abs(pred - target).mean(dim=1, keepdim=True)
+
+    return error
+
+
+def error_to_confidence(error: torch.Tensor, method: str = 'sigmoid',
+                        temperature: float = 5.0, bias: float = 0.5) -> torch.Tensor:
+    """
+    Convert error to confidence score.
+
+    Args:
+        error: Error map [B, 1, H, W]
+        method: 'sigmoid', 'linear', or 'percentile'
+        temperature: Temperature for sigmoid
+        bias: Bias for sigmoid
+
+    Returns:
+        Confidence map [B, 1, H, W] in [0, 1]
+    """
+    if method == 'sigmoid':
+        # Lower error = higher confidence
+        confidence = 1 - torch.sigmoid((error - bias) * temperature)
+    elif method == 'linear':
+        # Normalize to [0, 1] and invert
+        min_err = error.min()
+        max_err = error.max()
+        if max_err - min_err > 1e-6:
+            confidence = 1 - (error - min_err) / (max_err - min_err)
+        else:
+            confidence = torch.ones_like(error)
+    elif method == 'percentile':
+        # Use percentile-based normalization
+        flat = error.flatten()
+        p5 = torch.quantile(flat, 0.05)
+        p95 = torch.quantile(flat, 0.95)
+        normalized = (error - p5) / (p95 - p5 + 1e-6)
+        normalized = torch.clamp(normalized, 0, 1)
+        confidence = 1 - normalized
+    else:
+        confidence = 1 - torch.sigmoid((error - bias) * temperature)
+
+    return confidence
+
+
+def save_comparison_visualization(
+    input_img: torch.Tensor,
+    output_img: torch.Tensor,
+    gt_img: torch.Tensor,
+    cycle_confidence: torch.Tensor,
+    gt_error_map: torch.Tensor,
+    path: str,
+    threshold: float = 0.5
+):
+    """Save comprehensive comparison visualization."""
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+
+    # Convert tensors
+    input_np = (input_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+    output_np = (output_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+    gt_np = (gt_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+    cycle_conf_np = cycle_confidence.squeeze().cpu().numpy()
+    gt_error_np = gt_error_map.squeeze().cpu().numpy()
+
+    # GT-based confidence (invert error)
+    gt_conf_np = 1 - (gt_error_np - gt_error_np.min()) / (gt_error_np.max() - gt_error_np.min() + 1e-6)
+
+    # Row 1: Images
+    axes[0, 0].imshow(np.clip(input_np, 0, 1))
+    axes[0, 0].set_title('Input H&E', fontsize=12)
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(np.clip(output_np, 0, 1))
+    axes[0, 1].set_title('Generated IHC', fontsize=12)
+    axes[0, 1].axis('off')
+
+    axes[0, 2].imshow(np.clip(gt_np, 0, 1))
+    axes[0, 2].set_title('Ground Truth IHC', fontsize=12)
+    axes[0, 2].axis('off')
+
+    # Difference image
+    diff = np.abs(output_np - gt_np).mean(axis=2)
+    im = axes[0, 3].imshow(diff, cmap='hot', vmin=0, vmax=1)
+    axes[0, 3].set_title('Absolute Error (Generated vs GT)', fontsize=12)
+    axes[0, 3].axis('off')
+    plt.colorbar(im, ax=axes[0, 3], fraction=0.046, pad=0.04)
+
+    # Row 2: Confidence maps
+    im1 = axes[1, 0].imshow(cycle_conf_np, cmap='RdYlGn', vmin=0, vmax=1)
+    axes[1, 0].set_title(f'Cycle Confidence\n(mean: {cycle_conf_np.mean():.3f})', fontsize=12)
+    axes[1, 0].axis('off')
+    plt.colorbar(im1, ax=axes[1, 0], fraction=0.046, pad=0.04)
+
+    im2 = axes[1, 1].imshow(gt_conf_np, cmap='RdYlGn', vmin=0, vmax=1)
+    axes[1, 1].set_title(f'GT-based Confidence\n(mean: {gt_conf_np.mean():.3f})', fontsize=12)
+    axes[1, 1].axis('off')
+    plt.colorbar(im2, ax=axes[1, 1], fraction=0.046, pad=0.04)
+
+    # Correlation scatter plot
+    cycle_flat = cycle_conf_np.flatten()[::100]  # Subsample for speed
+    gt_flat = gt_conf_np.flatten()[::100]
+    axes[1, 2].scatter(cycle_flat, gt_flat, alpha=0.3, s=1)
+    axes[1, 2].plot([0, 1], [0, 1], 'r--', label='Perfect correlation')
+    axes[1, 2].set_xlabel('Cycle Confidence')
+    axes[1, 2].set_ylabel('GT-based Confidence')
+    correlation = np.corrcoef(cycle_flat, gt_flat)[0, 1]
+    axes[1, 2].set_title(f'Correlation: {correlation:.3f}', fontsize=12)
+    axes[1, 2].legend()
+    axes[1, 2].set_xlim([0, 1])
+    axes[1, 2].set_ylim([0, 1])
+
+    # Statistics text
+    stats_text = f"""Statistics:
+
+Cycle Confidence:
+  Mean: {cycle_conf_np.mean():.4f}
+  Std: {cycle_conf_np.std():.4f}
+
+GT Error:
+  Mean: {gt_error_np.mean():.4f}
+  Std: {gt_error_np.std():.4f}
+
+Correlation: {correlation:.4f}
+
+Coverage (cycle > {threshold}): {(cycle_conf_np >= threshold).mean():.1%}
+Coverage (GT-based > {threshold}): {(gt_conf_np >= threshold).mean():.1%}
+"""
+    axes[1, 3].text(0.1, 0.5, stats_text, fontsize=10, family='monospace',
+                    verticalalignment='center', transform=axes[1, 3].transAxes)
+    axes[1, 3].set_title('Statistics')
+    axes[1, 3].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    return correlation
+
+
 def save_composite_visualization(
     input_img: torch.Tensor,
     output_img: torch.Tensor,
@@ -194,13 +353,22 @@ class ConfidenceInference:
                 # Backward pass for reconstruction
                 recon = netG_backward(output, layers=[])
 
-                # Compute confidence
-                confidence_map = self.confidence_estimator(input_tensor, recon)
+                # Compute cycle reconstruction error
+                cycle_error = torch.abs(recon - input_tensor).mean(dim=1, keepdim=True)
+
+                # Use percentile-based normalization for better confidence calibration
+                flat_error = cycle_error.flatten()
+                p10 = torch.quantile(flat_error, 0.1)
+                p90 = torch.quantile(flat_error, 0.9)
+                normalized_error = (cycle_error - p10) / (p90 - p10 + 1e-6)
+                normalized_error = torch.clamp(normalized_error, 0, 1)
+                confidence_map = 1 - normalized_error
 
                 results = {
                     'output': output,
                     'confidence_map': confidence_map,
-                    'reconstruction': recon
+                    'reconstruction': recon,
+                    'cycle_error': cycle_error
                 }
 
             # Add patch-level confidence
@@ -266,6 +434,7 @@ def run_inference(opt):
     os.makedirs(os.path.join(output_dir, 'outputs'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'confidence_maps'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'visualizations'), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'comparisons'), exist_ok=True)
 
     if opt.save_confidence_overlay:
         os.makedirs(os.path.join(output_dir, 'overlays'), exist_ok=True)
@@ -278,6 +447,8 @@ def run_inference(opt):
     # Statistics collection
     all_coverages = []
     all_mean_confidences = []
+    all_correlations = []
+    all_gt_errors = []
 
     for i, data in enumerate(tqdm(dataset)):
         # Get image paths
@@ -291,6 +462,10 @@ def run_inference(opt):
         # Set input
         inferencer.model.set_input(data)
         input_tensor = inferencer.model.real_A
+
+        # Check if ground truth is available (for paired datasets)
+        has_gt = hasattr(inferencer.model, 'real_B') and inferencer.model.real_B is not None
+        gt_tensor = inferencer.model.real_B if has_gt else None
 
         # Process with confidence
         if opt.num_latent_samples > 1:
@@ -314,12 +489,27 @@ def run_inference(opt):
         save_image_tensor(output, os.path.join(output_dir, 'outputs', f'{img_name}.png'))
         save_confidence_map(confidence_map, os.path.join(output_dir, 'confidence_maps', f'{img_name}_conf.png'))
 
-        # Save composite visualization
-        save_composite_visualization(
-            input_tensor, output, confidence_map,
-            os.path.join(output_dir, 'visualizations', f'{img_name}_viz.png'),
-            threshold=opt.confidence_threshold
-        )
+        # If GT available, compute GT-based error and correlation
+        if has_gt and gt_tensor is not None:
+            gt_error_map = compute_error_map(output, gt_tensor, mode='l1')
+            gt_error_mean = gt_error_map.mean().item()
+            all_gt_errors.append(gt_error_mean)
+
+            # Save comparison visualization with correlation analysis
+            correlation = save_comparison_visualization(
+                input_tensor, output, gt_tensor,
+                confidence_map, gt_error_map,
+                os.path.join(output_dir, 'comparisons', f'{img_name}_comparison.png'),
+                threshold=opt.confidence_threshold
+            )
+            all_correlations.append(correlation)
+        else:
+            # Save simple composite visualization
+            save_composite_visualization(
+                input_tensor, output, confidence_map,
+                os.path.join(output_dir, 'visualizations', f'{img_name}_viz.png'),
+                threshold=opt.confidence_threshold
+            )
 
         # Save overlay
         if opt.save_confidence_overlay:
@@ -327,13 +517,26 @@ def run_inference(opt):
             save_image_tensor(overlay, os.path.join(output_dir, 'overlays', f'{img_name}_overlay.png'))
 
     # Print summary statistics
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("INFERENCE SUMMARY")
-    print("=" * 50)
+    print("=" * 60)
     print(f"Total images processed: {len(dataset)}")
     print(f"Mean coverage (conf >= {opt.confidence_threshold}): {np.mean(all_coverages):.1%}")
     print(f"Mean confidence: {np.mean(all_mean_confidences):.3f}")
-    print(f"Results saved to: {output_dir}")
+
+    if all_correlations:
+        print(f"\n[GT Analysis]")
+        print(f"Mean GT error: {np.mean(all_gt_errors):.4f}")
+        print(f"Mean correlation (cycle conf vs GT error): {np.mean(all_correlations):.4f}")
+        if np.mean(all_correlations) < 0.3:
+            print("\n⚠️  WARNING: Low correlation between cycle confidence and GT error!")
+            print("   This suggests cycle-consistency may not be a good proxy for prediction quality.")
+            print("   Consider:")
+            print("   1. Training longer (more epochs)")
+            print("   2. Increasing lambda_cycle weight")
+            print("   3. Using a different confidence estimation method")
+
+    print(f"\nResults saved to: {output_dir}")
 
     # Save summary
     summary = {
@@ -347,6 +550,12 @@ def run_inference(opt):
         'coverages': all_coverages,
         'mean_confidences': all_mean_confidences
     }
+
+    if all_correlations:
+        summary['mean_gt_error'] = float(np.mean(all_gt_errors))
+        summary['mean_correlation'] = float(np.mean(all_correlations))
+        summary['correlations'] = all_correlations
+        summary['gt_errors'] = all_gt_errors
 
     import json
     with open(os.path.join(output_dir, 'inference_summary.json'), 'w') as f:
