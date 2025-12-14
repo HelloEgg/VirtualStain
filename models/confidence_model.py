@@ -55,7 +55,7 @@ class ConfidenceModel(BaseModel):
         parser.add_argument('--nce_T', type=float, default=0.07)
         parser.add_argument('--num_patches', type=int, default=256)
         parser.add_argument('--flip_equivariance', type=util.str2bool, nargs='?', const=True, default=False)
-        parser.set_defaults(pool_size=0)
+        parser.set_defaults(pool_size=0, dataset_mode='aligned')  # Use aligned for paired H&E-IHC
 
         # Gaussian Pyramid and ASP options
         parser.add_argument('--lambda_gp', type=float, default=1.0)
