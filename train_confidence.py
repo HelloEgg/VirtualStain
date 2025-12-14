@@ -62,6 +62,7 @@ def train():
     for i, data in enumerate(dataset):
         if i == 0:
             model.data_dependent_initialize(data)
+            model.parallelize()  # Wrap networks in DataParallel for multi-GPU
             print("Data-dependent initialization complete.")
             break
 
