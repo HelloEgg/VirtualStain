@@ -366,20 +366,30 @@ def add_inference_options(parser):
     return parser
 
 
+class ConfidenceTestOptions(TestOptions):
+    """Test options with confidence-specific arguments."""
+
+    def initialize(self, parser):
+        parser = super().initialize(parser)
+        # Add confidence-specific options
+        parser.add_argument('--confidence_threshold', type=float, default=0.5,
+                            help='Threshold for low-confidence masking')
+        parser.add_argument('--num_latent_samples', type=int, default=1,
+                            help='Number of latent samples for confidence estimation')
+        parser.add_argument('--save_confidence_overlay', action='store_true',
+                            help='Save images with confidence overlay')
+        parser.add_argument('--confidence_patch_size', type=int, default=64,
+                            help='Patch size for patch-level confidence')
+        # Set defaults for confidence model
+        parser.set_defaults(model='confidence')
+        return parser
+
+
 if __name__ == '__main__':
-    # Parse options
-    opt = TestOptions().parse()
+    # Parse options with confidence-specific arguments
+    opt = ConfidenceTestOptions().parse()
 
-    # Add inference-specific options
-    parser = argparse.ArgumentParser()
-    parser = add_inference_options(parser)
-    args, _ = parser.parse_known_args()
-
-    # Merge options
-    for key, value in vars(args).items():
-        setattr(opt, key, value)
-
-    # Set defaults
+    # Set defaults for inference
     opt.num_threads = 0
     opt.batch_size = 1
     opt.serial_batches = True
