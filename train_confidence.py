@@ -111,7 +111,7 @@ def train():
                     conf_mean_B = model.confidence_map_B.mean().item() if model.confidence_map_B is not None else 0
                     print(f'  [Confidence] A: {conf_mean_A:.4f}, B: {conf_mean_B:.4f}')
 
-                if opt.display_id > 0:
+                if opt.display_id is not None and opt.display_id > 0:
                     visualizer.plot_current_losses(epoch, float(epoch_iter) / dataset_size, losses)
 
             # Save latest model
