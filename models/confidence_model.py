@@ -72,7 +72,8 @@ class ConfidenceModel(BaseModel):
         parser.add_argument('--num_latent_samples', type=int, default=5,
                             help='number of latent samples for confidence estimation')
         parser.add_argument('--confidence_mode', type=str, default='cycle_l1',
-                            choices=['cycle_l1', 'cycle_l2', 'cycle_ssim', 'variance', 'worst_case'],
+                            choices=['cycle_l1', 'cycle_l2', 'cycle_ssim', 'variance', 'worst_case',
+                                     'discriminator', 'mc_dropout', 'ensemble'],
                             help='method for confidence estimation')
         parser.add_argument('--confidence_threshold', type=float, default=0.5,
                             help='threshold for low-confidence masking')
@@ -80,6 +81,10 @@ class ConfidenceModel(BaseModel):
                             help='use dropout at inference for uncertainty estimation')
         parser.add_argument('--dropout_rate', type=float, default=0.5,
                             help='dropout rate for uncertainty estimation')
+        parser.add_argument('--mc_dropout_samples', type=int, default=10,
+                            help='number of MC dropout samples for uncertainty estimation')
+        parser.add_argument('--load_discriminator', type=util.str2bool, default=False,
+                            help='load discriminator for confidence estimation (test mode)')
 
         opt, _ = parser.parse_known_args()
 
@@ -106,7 +111,11 @@ class ConfidenceModel(BaseModel):
         if self.isTrain:
             self.model_names = ['G_A', 'G_B', 'F_A', 'F_B', 'D_A', 'D_B']
         else:
-            self.model_names = ['G_A', 'G_B']
+            # Load discriminators for discriminator-based confidence estimation
+            if opt.confidence_mode == 'discriminator' or opt.load_discriminator:
+                self.model_names = ['G_A', 'G_B', 'D_A', 'D_B']
+            else:
+                self.model_names = ['G_A', 'G_B']
 
         # Define networks
         # G_A: H&E -> IHC (forward)
@@ -128,7 +137,8 @@ class ConfidenceModel(BaseModel):
                                          opt.init_type, opt.init_gain, opt.no_antialias,
                                          self.gpu_ids, opt)
 
-        if self.isTrain:
+        # Define discriminators for training or for discriminator-based confidence
+        if self.isTrain or opt.confidence_mode == 'discriminator' or opt.load_discriminator:
             # Discriminators
             self.netD_A = networks.define_D(opt.output_nc, opt.ndf, opt.netD, opt.n_layers_D,
                                             opt.normD, opt.init_type, opt.init_gain,
@@ -137,6 +147,7 @@ class ConfidenceModel(BaseModel):
                                             opt.normD, opt.init_type, opt.init_gain,
                                             opt.no_antialias, self.gpu_ids, opt)
 
+        if self.isTrain:
             # Loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)
             self.criterionNCE = PatchNCELoss(opt).to(self.device)
@@ -241,6 +252,182 @@ class ConfidenceModel(BaseModel):
             # Normalize using sigmoid for smooth transition
             self.confidence_map_A = 1 - torch.sigmoid(error_A * 5 - 2.5)
             self.confidence_map_B = 1 - torch.sigmoid(error_B * 5 - 2.5)
+
+    def compute_discriminator_confidence(self, fake_img, direction='AtoB'):
+        """
+        Compute confidence using discriminator's realness score.
+
+        The discriminator outputs a patch-wise score indicating how "real" each patch looks.
+        High scores indicate the generated patch looks realistic, which correlates with confidence.
+
+        Args:
+            fake_img: Generated image tensor [B, C, H, W]
+            direction: 'AtoB' uses D_A (IHC discriminator), 'BtoA' uses D_B (H&E discriminator)
+
+        Returns:
+            confidence_map: Per-pixel confidence map [B, 1, H, W]
+        """
+        # Select discriminator based on direction
+        if direction == 'AtoB':
+            netD = self.netD_A  # Discriminates IHC (output of G_A)
+        else:
+            netD = self.netD_B  # Discriminates H&E (output of G_B)
+
+        netD.eval()
+
+        with torch.no_grad():
+            # Get discriminator output (PatchGAN output)
+            d_out = netD(fake_img)
+
+            # d_out is typically [B, 1, H', W'] where H', W' are smaller than original
+            # Apply sigmoid to get probability of "real"
+            realness = torch.sigmoid(d_out)
+
+            # Upsample to original image size
+            confidence_map = F.interpolate(
+                realness,
+                size=(fake_img.size(2), fake_img.size(3)),
+                mode='bilinear',
+                align_corners=False
+            )
+
+        return confidence_map
+
+    def compute_mc_dropout_confidence(self, x, num_samples=None, direction='AtoB'):
+        """
+        Compute confidence using MC Dropout (Monte Carlo Dropout).
+
+        Runs multiple forward passes with dropout enabled to estimate epistemic uncertainty.
+        High variance across samples indicates low confidence.
+
+        Args:
+            x: Input image tensor [B, C, H, W]
+            num_samples: Number of MC samples (default: opt.mc_dropout_samples)
+            direction: 'AtoB' for H&E->IHC, 'BtoA' for IHC->H&E
+
+        Returns:
+            mean_output: Mean prediction across samples
+            confidence_map: Confidence based on inverse variance
+            std_map: Standard deviation map (for visualization)
+        """
+        if num_samples is None:
+            num_samples = getattr(self.opt, 'mc_dropout_samples', 10)
+
+        if direction == 'AtoB':
+            netG = self.netG_A
+        else:
+            netG = self.netG_B
+
+        # Enable dropout (training mode activates dropout)
+        netG.train()
+
+        outputs = []
+        with torch.no_grad():
+            for _ in range(num_samples):
+                fake = netG(x, layers=[])
+                outputs.append(fake)
+
+        # Stack outputs: [N, B, C, H, W]
+        outputs = torch.stack(outputs, dim=0)
+
+        # Compute mean and variance
+        mean_output = outputs.mean(dim=0)
+        variance = outputs.var(dim=0)  # [B, C, H, W]
+
+        # Average variance across channels for confidence map
+        variance_map = variance.mean(dim=1, keepdim=True)  # [B, 1, H, W]
+
+        # Standard deviation for visualization
+        std_map = torch.sqrt(variance_map + 1e-8)
+
+        # Convert variance to confidence
+        # Use percentile-based normalization for better calibration
+        var_flat = variance_map.view(-1)
+        p5 = torch.quantile(var_flat, 0.05)
+        p95 = torch.quantile(var_flat, 0.95)
+
+        # Normalize variance to [0, 1] range
+        normalized_var = (variance_map - p5) / (p95 - p5 + 1e-8)
+        normalized_var = normalized_var.clamp(0, 1)
+
+        # High variance = low confidence
+        confidence_map = 1 - normalized_var
+
+        # Reset to eval mode
+        netG.eval()
+
+        return mean_output, confidence_map, std_map
+
+    def compute_ensemble_confidence(self, x, direction='AtoB'):
+        """
+        Compute confidence by combining multiple confidence estimation methods.
+
+        Combines:
+        1. Discriminator-based confidence (realness)
+        2. MC Dropout confidence (epistemic uncertainty)
+        3. Cycle consistency confidence (reconstruction error)
+
+        Args:
+            x: Input image tensor [B, C, H, W]
+            direction: Translation direction
+
+        Returns:
+            results: Dictionary containing individual and combined confidence maps
+        """
+        results = {}
+
+        # 1. Discriminator-based confidence
+        if hasattr(self, 'netD_A') and hasattr(self, 'netD_B'):
+            if direction == 'AtoB':
+                fake = self.netG_A(x, layers=[])
+            else:
+                fake = self.netG_B(x, layers=[])
+            disc_conf = self.compute_discriminator_confidence(fake, direction)
+            results['confidence_discriminator'] = disc_conf
+            results['fake'] = fake
+        else:
+            # Generate without discriminator
+            if direction == 'AtoB':
+                fake = self.netG_A(x, layers=[])
+            else:
+                fake = self.netG_B(x, layers=[])
+            results['fake'] = fake
+
+        # 2. MC Dropout confidence
+        mean_output, mc_conf, std_map = self.compute_mc_dropout_confidence(x, direction=direction)
+        results['confidence_mc_dropout'] = mc_conf
+        results['std_map'] = std_map
+        results['mean_output'] = mean_output
+
+        # 3. Cycle consistency confidence
+        if direction == 'AtoB':
+            rec = self.netG_B(results['fake'], layers=[])
+        else:
+            rec = self.netG_A(results['fake'], layers=[])
+
+        cycle_error = torch.abs(rec - x).mean(dim=1, keepdim=True)
+        # Percentile-based normalization
+        err_flat = cycle_error.view(-1)
+        p5 = torch.quantile(err_flat, 0.05)
+        p95 = torch.quantile(err_flat, 0.95)
+        normalized_err = (cycle_error - p5) / (p95 - p5 + 1e-8)
+        normalized_err = normalized_err.clamp(0, 1)
+        cycle_conf = 1 - normalized_err
+        results['confidence_cycle'] = cycle_conf
+        results['rec'] = rec
+
+        # 4. Combine confidences (geometric mean)
+        if 'confidence_discriminator' in results:
+            combined = (results['confidence_discriminator'] *
+                        results['confidence_mc_dropout'] *
+                        results['confidence_cycle']) ** (1/3)
+        else:
+            combined = (results['confidence_mc_dropout'] *
+                        results['confidence_cycle']) ** (1/2)
+
+        results['confidence_combined'] = combined
+
+        return results
 
     def compute_confidence_with_sampling(self, x, num_samples=None, direction='AtoB'):
         """
