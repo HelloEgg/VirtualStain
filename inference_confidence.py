@@ -287,14 +287,174 @@ def save_composite_visualization(
     plt.close()
 
 
+def save_multi_method_comparison(
+    input_img: torch.Tensor,
+    output_img: torch.Tensor,
+    gt_img: Optional[torch.Tensor],
+    results: Dict[str, torch.Tensor],
+    path: str,
+    threshold: float = 0.5
+):
+    """
+    Save comprehensive comparison of different confidence estimation methods.
+
+    Args:
+        input_img: Input H&E image
+        output_img: Generated IHC image
+        gt_img: Ground truth IHC (optional)
+        results: Dictionary containing different confidence maps
+        path: Output path
+        threshold: Confidence threshold
+    """
+    import matplotlib.pyplot as plt
+
+    # Determine number of confidence methods available
+    conf_keys = [k for k in results.keys() if k.startswith('confidence_') and results[k] is not None]
+    n_conf = len(conf_keys)
+
+    # Calculate figure layout
+    n_rows = 2 if gt_img is None else 3
+    n_cols = max(4, n_conf + 1)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
+
+    # Convert tensors
+    input_np = (input_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+    output_np = (output_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+
+    # Row 1: Images
+    axes[0, 0].imshow(np.clip(input_np, 0, 1))
+    axes[0, 0].set_title('Input H&E', fontsize=12)
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(np.clip(output_np, 0, 1))
+    axes[0, 1].set_title('Generated IHC', fontsize=12)
+    axes[0, 1].axis('off')
+
+    if gt_img is not None:
+        gt_np = (gt_img.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+        axes[0, 2].imshow(np.clip(gt_np, 0, 1))
+        axes[0, 2].set_title('Ground Truth IHC', fontsize=12)
+        axes[0, 2].axis('off')
+
+        # Difference image
+        diff = np.abs(output_np - gt_np).mean(axis=2)
+        im = axes[0, 3].imshow(diff, cmap='hot', vmin=0, vmax=1)
+        axes[0, 3].set_title('Absolute Error', fontsize=12)
+        axes[0, 3].axis('off')
+        plt.colorbar(im, ax=axes[0, 3], fraction=0.046, pad=0.04)
+    else:
+        for i in range(2, n_cols):
+            axes[0, i].axis('off')
+
+    # Row 2: Confidence maps from different methods
+    method_names = {
+        'confidence_discriminator': 'Discriminator',
+        'confidence_mc_dropout': 'MC Dropout',
+        'confidence_cycle': 'Cycle',
+        'confidence_combined': 'Combined',
+        'confidence_map': 'Main'
+    }
+
+    correlations = {}
+    for idx, key in enumerate(conf_keys):
+        if idx >= n_cols:
+            break
+        conf = results[key]
+        if conf is None:
+            continue
+        conf_np = conf.squeeze().cpu().numpy()
+        name = method_names.get(key, key.replace('confidence_', ''))
+
+        im = axes[1, idx].imshow(conf_np, cmap='RdYlGn', vmin=0, vmax=1)
+        mean_conf = conf_np.mean()
+        coverage = (conf_np >= threshold).mean()
+        axes[1, idx].set_title(f'{name}\nmean={mean_conf:.3f}, cov={coverage:.1%}', fontsize=10)
+        axes[1, idx].axis('off')
+        plt.colorbar(im, ax=axes[1, idx], fraction=0.046, pad=0.04)
+
+        # Compute correlation with GT error if available
+        if gt_img is not None:
+            gt_error_np = np.abs(output_np - gt_np).mean(axis=2)
+            # Invert error to get GT-based confidence
+            gt_conf_np = 1 - (gt_error_np - gt_error_np.min()) / (gt_error_np.max() - gt_error_np.min() + 1e-6)
+            corr = np.corrcoef(conf_np.flatten(), gt_conf_np.flatten())[0, 1]
+            correlations[name] = corr
+
+    # Hide unused axes in row 2
+    for idx in range(len(conf_keys), n_cols):
+        axes[1, idx].axis('off')
+
+    # Row 3: Correlation analysis (if GT available)
+    if gt_img is not None and n_rows > 2:
+        gt_error_np = np.abs(output_np - gt_np).mean(axis=2)
+        gt_conf_np = 1 - (gt_error_np - gt_error_np.min()) / (gt_error_np.max() - gt_error_np.min() + 1e-6)
+
+        # GT-based confidence map
+        im = axes[2, 0].imshow(gt_conf_np, cmap='RdYlGn', vmin=0, vmax=1)
+        axes[2, 0].set_title(f'GT-based Confidence\nmean={gt_conf_np.mean():.3f}', fontsize=10)
+        axes[2, 0].axis('off')
+        plt.colorbar(im, ax=axes[2, 0], fraction=0.046, pad=0.04)
+
+        # Scatter plots for each method
+        plot_idx = 1
+        for key in conf_keys[:3]:  # Limit to 3 scatter plots
+            if results[key] is None:
+                continue
+            conf_np = results[key].squeeze().cpu().numpy().flatten()
+            gt_flat = gt_conf_np.flatten()
+
+            # Subsample for speed
+            step = max(1, len(conf_np) // 5000)
+            axes[2, plot_idx].scatter(conf_np[::step], gt_flat[::step], alpha=0.3, s=1)
+            axes[2, plot_idx].plot([0, 1], [0, 1], 'r--', alpha=0.5)
+            name = method_names.get(key, key.replace('confidence_', ''))
+            corr = correlations.get(name, 0)
+            axes[2, plot_idx].set_title(f'{name} vs GT\nr={corr:.3f}', fontsize=10)
+            axes[2, plot_idx].set_xlim([0, 1])
+            axes[2, plot_idx].set_ylim([0, 1])
+            axes[2, plot_idx].set_xlabel('Predicted Conf')
+            axes[2, plot_idx].set_ylabel('GT-based Conf')
+            plot_idx += 1
+
+        # Summary statistics
+        if plot_idx < n_cols:
+            stats_text = "Correlation Summary:\n\n"
+            for name, corr in correlations.items():
+                stats_text += f"{name}: {corr:.4f}\n"
+            stats_text += f"\nBest: {max(correlations.items(), key=lambda x: x[1])[0]}"
+            axes[2, plot_idx].text(0.1, 0.5, stats_text, fontsize=10, family='monospace',
+                                   verticalalignment='center', transform=axes[2, plot_idx].transAxes)
+            axes[2, plot_idx].set_title('Summary')
+            axes[2, plot_idx].axis('off')
+            plot_idx += 1
+
+        # Hide unused axes
+        for idx in range(plot_idx, n_cols):
+            axes[2, idx].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    return correlations
+
+
 class ConfidenceInference:
     """
     Inference class for confidence-aware virtual staining.
+
+    Supports multiple confidence estimation methods:
+    - cycle_l1/cycle_l2: Cycle reconstruction error
+    - discriminator: Discriminator realness score
+    - mc_dropout: MC Dropout variance
+    - ensemble: Combination of all methods
     """
 
     def __init__(self, opt):
         self.opt = opt
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.confidence_mode = getattr(opt, 'confidence_mode', 'cycle_l1')
 
         # Create model
         self.model = create_model(opt)
@@ -303,7 +463,7 @@ class ConfidenceInference:
 
         # Create confidence estimator
         self.confidence_estimator = ConfidenceEstimator(
-            mode=getattr(opt, 'confidence_mode', 'cycle_l1'),
+            mode=self.confidence_mode,
             num_samples=getattr(opt, 'num_latent_samples', 5)
         ).to(self.device)
 
@@ -312,6 +472,8 @@ class ConfidenceInference:
             patch_size=getattr(opt, 'confidence_patch_size', 64),
             threshold=opt.confidence_threshold
         )
+
+        print(f"Confidence mode: {self.confidence_mode}")
 
     def process_single(
         self,
@@ -331,45 +493,18 @@ class ConfidenceInference:
         input_tensor = input_tensor.to(self.device)
 
         with torch.no_grad():
-            # Use model's confidence-aware generation if available
-            if hasattr(self.model, 'generate_with_confidence'):
-                results = self.model.generate_with_confidence(
-                    input_tensor,
-                    direction=direction,
-                    apply_mask=True
-                )
+            results = {}
+
+            # Select confidence computation method
+            if self.confidence_mode == 'discriminator':
+                results = self._process_discriminator(input_tensor, direction)
+            elif self.confidence_mode == 'mc_dropout':
+                results = self._process_mc_dropout(input_tensor, direction)
+            elif self.confidence_mode == 'ensemble':
+                results = self._process_ensemble(input_tensor, direction)
             else:
-                # Fallback: manual confidence computation
-                if direction == 'AtoB':
-                    netG_forward = self.model.netG_A
-                    netG_backward = self.model.netG_B
-                else:
-                    netG_forward = self.model.netG_B
-                    netG_backward = self.model.netG_A
-
-                # Forward pass
-                output = netG_forward(input_tensor, layers=[])
-
-                # Backward pass for reconstruction
-                recon = netG_backward(output, layers=[])
-
-                # Compute cycle reconstruction error
-                cycle_error = torch.abs(recon - input_tensor).mean(dim=1, keepdim=True)
-
-                # Use percentile-based normalization for better confidence calibration
-                flat_error = cycle_error.flatten()
-                p10 = torch.quantile(flat_error, 0.1)
-                p90 = torch.quantile(flat_error, 0.9)
-                normalized_error = (cycle_error - p10) / (p90 - p10 + 1e-6)
-                normalized_error = torch.clamp(normalized_error, 0, 1)
-                confidence_map = 1 - normalized_error
-
-                results = {
-                    'output': output,
-                    'confidence_map': confidence_map,
-                    'reconstruction': recon,
-                    'cycle_error': cycle_error
-                }
+                # Default: cycle-based confidence
+                results = self._process_cycle(input_tensor, direction)
 
             # Add patch-level confidence
             patch_conf, low_conf_mask = self.patch_confidence(results['confidence_map'])
@@ -384,6 +519,117 @@ class ConfidenceInference:
             )
 
         return results
+
+    def _process_cycle(
+        self,
+        input_tensor: torch.Tensor,
+        direction: str = 'AtoB'
+    ) -> Dict[str, torch.Tensor]:
+        """Process with cycle-consistency based confidence."""
+        if direction == 'AtoB':
+            netG_forward = self.model.netG_A
+            netG_backward = self.model.netG_B
+        else:
+            netG_forward = self.model.netG_B
+            netG_backward = self.model.netG_A
+
+        # Forward pass
+        output = netG_forward(input_tensor, layers=[])
+
+        # Backward pass for reconstruction
+        recon = netG_backward(output, layers=[])
+
+        # Compute cycle reconstruction error
+        cycle_error = torch.abs(recon - input_tensor).mean(dim=1, keepdim=True)
+
+        # Use percentile-based normalization for better confidence calibration
+        flat_error = cycle_error.flatten()
+        p10 = torch.quantile(flat_error, 0.1)
+        p90 = torch.quantile(flat_error, 0.9)
+        normalized_error = (cycle_error - p10) / (p90 - p10 + 1e-6)
+        normalized_error = torch.clamp(normalized_error, 0, 1)
+        confidence_map = 1 - normalized_error
+
+        return {
+            'output': output,
+            'confidence_map': confidence_map,
+            'reconstruction': recon,
+            'cycle_error': cycle_error
+        }
+
+    def _process_discriminator(
+        self,
+        input_tensor: torch.Tensor,
+        direction: str = 'AtoB'
+    ) -> Dict[str, torch.Tensor]:
+        """Process with discriminator-based confidence."""
+        if not hasattr(self.model, 'compute_discriminator_confidence'):
+            print("Warning: Model doesn't have discriminator confidence method, falling back to cycle.")
+            return self._process_cycle(input_tensor, direction)
+
+        if direction == 'AtoB':
+            netG = self.model.netG_A
+        else:
+            netG = self.model.netG_B
+
+        # Forward pass
+        output = netG(input_tensor, layers=[])
+
+        # Compute discriminator confidence
+        confidence_map = self.model.compute_discriminator_confidence(output, direction)
+
+        return {
+            'output': output,
+            'confidence_map': confidence_map,
+            'confidence_type': 'discriminator'
+        }
+
+    def _process_mc_dropout(
+        self,
+        input_tensor: torch.Tensor,
+        direction: str = 'AtoB'
+    ) -> Dict[str, torch.Tensor]:
+        """Process with MC Dropout-based confidence."""
+        if not hasattr(self.model, 'compute_mc_dropout_confidence'):
+            print("Warning: Model doesn't have MC dropout method, falling back to cycle.")
+            return self._process_cycle(input_tensor, direction)
+
+        # Compute MC dropout confidence
+        mean_output, confidence_map, std_map = self.model.compute_mc_dropout_confidence(
+            input_tensor,
+            num_samples=getattr(self.opt, 'mc_dropout_samples', 10),
+            direction=direction
+        )
+
+        return {
+            'output': mean_output,
+            'confidence_map': confidence_map,
+            'std_map': std_map,
+            'confidence_type': 'mc_dropout'
+        }
+
+    def _process_ensemble(
+        self,
+        input_tensor: torch.Tensor,
+        direction: str = 'AtoB'
+    ) -> Dict[str, torch.Tensor]:
+        """Process with ensemble of confidence methods."""
+        if not hasattr(self.model, 'compute_ensemble_confidence'):
+            print("Warning: Model doesn't have ensemble method, falling back to cycle.")
+            return self._process_cycle(input_tensor, direction)
+
+        # Compute ensemble confidence
+        results = self.model.compute_ensemble_confidence(input_tensor, direction)
+
+        return {
+            'output': results['fake'],
+            'confidence_map': results['confidence_combined'],
+            'confidence_discriminator': results.get('confidence_discriminator'),
+            'confidence_mc_dropout': results.get('confidence_mc_dropout'),
+            'confidence_cycle': results.get('confidence_cycle'),
+            'std_map': results.get('std_map'),
+            'confidence_type': 'ensemble'
+        }
 
     def process_with_multiple_samples(
         self,
@@ -428,8 +674,9 @@ def run_inference(opt):
     # Create dataset
     dataset = create_dataset(opt)
 
-    # Create output directory
-    output_dir = os.path.join(opt.results_dir, opt.name, f'{opt.phase}_{opt.epoch}')
+    # Create output directory with confidence mode in path
+    confidence_mode = getattr(opt, 'confidence_mode', 'cycle_l1')
+    output_dir = os.path.join(opt.results_dir, opt.name, f'{opt.phase}_{opt.epoch}_{confidence_mode}')
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'outputs'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'confidence_maps'), exist_ok=True)
@@ -439,15 +686,20 @@ def run_inference(opt):
     if opt.save_confidence_overlay:
         os.makedirs(os.path.join(output_dir, 'overlays'), exist_ok=True)
 
+    if confidence_mode == 'ensemble':
+        os.makedirs(os.path.join(output_dir, 'ensemble_comparisons'), exist_ok=True)
+
     print(f"Processing {len(dataset)} images...")
     print(f"Output directory: {output_dir}")
+    print(f"Confidence mode: {confidence_mode}")
     print(f"Confidence threshold: {opt.confidence_threshold}")
-    print(f"Number of latent samples: {opt.num_latent_samples}")
+    if confidence_mode == 'mc_dropout':
+        print(f"MC Dropout samples: {getattr(opt, 'mc_dropout_samples', 10)}")
 
     # Statistics collection
     all_coverages = []
     all_mean_confidences = []
-    all_correlations = []
+    all_correlations = {}  # Now a dict for multiple methods
     all_gt_errors = []
 
     for i, data in enumerate(tqdm(dataset)):
@@ -468,13 +720,7 @@ def run_inference(opt):
         gt_tensor = inferencer.model.real_B if has_gt else None
 
         # Process with confidence
-        if opt.num_latent_samples > 1:
-            results = inferencer.process_with_multiple_samples(
-                input_tensor,
-                num_samples=opt.num_latent_samples
-            )
-        else:
-            results = inferencer.process_single(input_tensor)
+        results = inferencer.process_single(input_tensor)
 
         output = results['output']
         confidence_map = results['confidence_map']
@@ -495,14 +741,29 @@ def run_inference(opt):
             gt_error_mean = gt_error_map.mean().item()
             all_gt_errors.append(gt_error_mean)
 
-            # Save comparison visualization with correlation analysis
-            correlation = save_comparison_visualization(
-                input_tensor, output, gt_tensor,
-                confidence_map, gt_error_map,
-                os.path.join(output_dir, 'comparisons', f'{img_name}_comparison.png'),
-                threshold=opt.confidence_threshold
-            )
-            all_correlations.append(correlation)
+            # For ensemble mode, save multi-method comparison
+            if confidence_mode == 'ensemble' and results.get('confidence_type') == 'ensemble':
+                correlations = save_multi_method_comparison(
+                    input_tensor, output, gt_tensor, results,
+                    os.path.join(output_dir, 'ensemble_comparisons', f'{img_name}_ensemble.png'),
+                    threshold=opt.confidence_threshold
+                )
+                # Accumulate correlations per method
+                for method, corr in correlations.items():
+                    if method not in all_correlations:
+                        all_correlations[method] = []
+                    all_correlations[method].append(corr)
+            else:
+                # Save standard comparison visualization
+                correlation = save_comparison_visualization(
+                    input_tensor, output, gt_tensor,
+                    confidence_map, gt_error_map,
+                    os.path.join(output_dir, 'comparisons', f'{img_name}_comparison.png'),
+                    threshold=opt.confidence_threshold
+                )
+                if 'main' not in all_correlations:
+                    all_correlations['main'] = []
+                all_correlations['main'].append(correlation)
         else:
             # Save simple composite visualization
             save_composite_visualization(
@@ -516,33 +777,58 @@ def run_inference(opt):
             overlay = results.get('abstention_viz', output)
             save_image_tensor(overlay, os.path.join(output_dir, 'overlays', f'{img_name}_overlay.png'))
 
+        # Save std map for MC dropout
+        if 'std_map' in results and results['std_map'] is not None:
+            save_confidence_map(
+                results['std_map'],
+                os.path.join(output_dir, 'confidence_maps', f'{img_name}_std.png'),
+                colormap='viridis'
+            )
+
     # Print summary statistics
     print("\n" + "=" * 60)
     print("INFERENCE SUMMARY")
     print("=" * 60)
+    print(f"Confidence mode: {confidence_mode}")
     print(f"Total images processed: {len(dataset)}")
     print(f"Mean coverage (conf >= {opt.confidence_threshold}): {np.mean(all_coverages):.1%}")
     print(f"Mean confidence: {np.mean(all_mean_confidences):.3f}")
 
     if all_correlations:
-        print(f"\n[GT Analysis]")
+        print(f"\n[GT Analysis - Correlation with GT-based confidence]")
         print(f"Mean GT error: {np.mean(all_gt_errors):.4f}")
-        print(f"Mean correlation (cycle conf vs GT error): {np.mean(all_correlations):.4f}")
-        if np.mean(all_correlations) < 0.3:
-            print("\n⚠️  WARNING: Low correlation between cycle confidence and GT error!")
-            print("   This suggests cycle-consistency may not be a good proxy for prediction quality.")
+        print("-" * 40)
+        for method, corrs in all_correlations.items():
+            mean_corr = np.mean(corrs)
+            print(f"  {method}: {mean_corr:.4f}")
+
+        # Find best method
+        best_method = max(all_correlations.items(), key=lambda x: np.mean(x[1]))
+        print("-" * 40)
+        print(f"  Best method: {best_method[0]} (r={np.mean(best_method[1]):.4f})")
+
+        # Recommendations
+        best_corr = np.mean(best_method[1])
+        if best_corr < 0.3:
+            print("\n⚠️  WARNING: Low correlation across all methods!")
             print("   Consider:")
             print("   1. Training longer (more epochs)")
-            print("   2. Increasing lambda_cycle weight")
-            print("   3. Using a different confidence estimation method")
+            print("   2. Using different network architecture")
+            print("   3. Checking data quality")
+        elif best_corr < 0.5:
+            print(f"\n📊 Moderate correlation with {best_method[0]} method.")
+            print("   This might be usable for selective prediction.")
+        else:
+            print(f"\n✓ Good correlation with {best_method[0]} method!")
+            print("   Confidence maps appear reliable for selective prediction.")
 
     print(f"\nResults saved to: {output_dir}")
 
     # Save summary
     summary = {
+        'confidence_mode': confidence_mode,
         'num_images': len(dataset),
         'confidence_threshold': opt.confidence_threshold,
-        'num_latent_samples': opt.num_latent_samples,
         'mean_coverage': float(np.mean(all_coverages)),
         'std_coverage': float(np.std(all_coverages)),
         'mean_confidence': float(np.mean(all_mean_confidences)),
@@ -551,11 +837,23 @@ def run_inference(opt):
         'mean_confidences': all_mean_confidences
     }
 
-    if all_correlations:
+    if all_gt_errors:
         summary['mean_gt_error'] = float(np.mean(all_gt_errors))
-        summary['mean_correlation'] = float(np.mean(all_correlations))
-        summary['correlations'] = all_correlations
         summary['gt_errors'] = all_gt_errors
+
+    if all_correlations:
+        summary['correlations_by_method'] = {
+            method: {
+                'mean': float(np.mean(corrs)),
+                'std': float(np.std(corrs)),
+                'values': corrs
+            }
+            for method, corrs in all_correlations.items()
+        }
+        # Find best method
+        best_method = max(all_correlations.items(), key=lambda x: np.mean(x[1]))
+        summary['best_method'] = best_method[0]
+        summary['best_correlation'] = float(np.mean(best_method[1]))
 
     import json
     with open(os.path.join(output_dir, 'inference_summary.json'), 'w') as f:
@@ -581,14 +879,99 @@ class ConfidenceTestOptions(TestOptions):
     def initialize(self, parser):
         parser = super().initialize(parser)
         # Add inference-specific options (not already in model)
-        # Note: confidence_threshold, num_latent_samples are defined in ConfidenceModel
+        # Note: confidence_threshold, num_latent_samples, confidence_mode are defined in ConfidenceModel
         parser.add_argument('--save_confidence_overlay', action='store_true',
                             help='Save images with confidence overlay')
         parser.add_argument('--confidence_patch_size', type=int, default=64,
                             help='Patch size for patch-level confidence')
+        parser.add_argument('--compare_all', action='store_true',
+                            help='Compare all confidence methods and generate comprehensive report')
         # Set defaults for confidence model
         parser.set_defaults(model='confidence')
         return parser
+
+
+def compare_all_methods(opt):
+    """
+    Compare all confidence methods on the dataset.
+    Runs inference with each method and generates a comprehensive comparison report.
+    """
+    methods = ['cycle_l1', 'discriminator', 'mc_dropout', 'ensemble']
+    all_results = {}
+
+    print("=" * 70)
+    print("COMPARING ALL CONFIDENCE METHODS")
+    print("=" * 70)
+
+    for method in methods:
+        print(f"\n{'='*70}")
+        print(f"Testing method: {method}")
+        print("=" * 70)
+
+        # Update options for this method
+        opt.confidence_mode = method
+
+        # For discriminator mode, ensure discriminator is loaded
+        if method == 'discriminator':
+            opt.load_discriminator = True
+
+        try:
+            run_inference(opt)
+
+            # Load the summary
+            output_dir = os.path.join(opt.results_dir, opt.name, f'{opt.phase}_{opt.epoch}_{method}')
+            import json
+            with open(os.path.join(output_dir, 'inference_summary.json'), 'r') as f:
+                summary = json.load(f)
+            all_results[method] = summary
+        except Exception as e:
+            print(f"Error running method {method}: {e}")
+            all_results[method] = {'error': str(e)}
+
+    # Print comparison summary
+    print("\n" + "=" * 70)
+    print("COMPARISON SUMMARY")
+    print("=" * 70)
+
+    print(f"\n{'Method':<15} {'Mean Conf':<12} {'Coverage':<12} {'Correlation':<12}")
+    print("-" * 60)
+
+    best_corr = -1
+    best_method = None
+
+    for method, result in all_results.items():
+        if 'error' in result:
+            print(f"{method:<15} ERROR: {result['error'][:40]}")
+            continue
+
+        mean_conf = result.get('mean_confidence', 0)
+        coverage = result.get('mean_coverage', 0)
+        corr = result.get('best_correlation', result.get('correlations_by_method', {}).get('main', {}).get('mean', 0))
+
+        print(f"{method:<15} {mean_conf:<12.4f} {coverage:<12.1%} {corr:<12.4f}")
+
+        if corr > best_corr:
+            best_corr = corr
+            best_method = method
+
+    print("-" * 60)
+    if best_method:
+        print(f"\n✓ Best method: {best_method} (correlation: {best_corr:.4f})")
+
+    # Save overall comparison
+    output_dir = os.path.join(opt.results_dir, opt.name, 'method_comparison')
+    os.makedirs(output_dir, exist_ok=True)
+
+    import json
+    with open(os.path.join(output_dir, 'comparison_summary.json'), 'w') as f:
+        json.dump({
+            'methods_tested': methods,
+            'results': all_results,
+            'best_method': best_method,
+            'best_correlation': best_corr
+        }, f, indent=2)
+
+    print(f"\nComparison saved to: {output_dir}")
 
 
 if __name__ == '__main__':
@@ -601,5 +984,30 @@ if __name__ == '__main__':
     opt.serial_batches = True
     opt.no_flip = True
 
-    # Run inference
-    run_inference(opt)
+    # Check if we should compare all methods
+    if getattr(opt, 'compare_all', False):
+        compare_all_methods(opt)
+    else:
+        # Run inference with single method
+        run_inference(opt)
+
+    print("\n" + "=" * 60)
+    print("USAGE EXAMPLES:")
+    print("=" * 60)
+    print("""
+# Discriminator-based confidence (uses trained discriminator's realness score):
+python inference_confidence.py --dataroot ./datasets/MIST/HER2/TrainValAB \\
+    --name confidence_her2 --confidence_mode discriminator --load_discriminator
+
+# MC Dropout confidence (uses variance from multiple stochastic passes):
+python inference_confidence.py --dataroot ./datasets/MIST/HER2/TrainValAB \\
+    --name confidence_her2 --confidence_mode mc_dropout --mc_dropout_samples 10
+
+# Ensemble confidence (combines all methods):
+python inference_confidence.py --dataroot ./datasets/MIST/HER2/TrainValAB \\
+    --name confidence_her2 --confidence_mode ensemble --load_discriminator
+
+# Compare all methods:
+python inference_confidence.py --dataroot ./datasets/MIST/HER2/TrainValAB \\
+    --name confidence_her2 --compare_all
+""")
