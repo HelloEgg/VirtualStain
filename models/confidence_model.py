@@ -83,7 +83,7 @@ class ConfidenceModel(BaseModel):
                             help='dropout rate for uncertainty estimation')
         parser.add_argument('--mc_dropout_samples', type=int, default=10,
                             help='number of MC dropout samples for uncertainty estimation')
-        parser.add_argument('--load_discriminator', type=util.str2bool, default=False,
+        parser.add_argument('--load_discriminator', action='store_true',
                             help='load discriminator for confidence estimation (test mode)')
 
         opt, _ = parser.parse_known_args()
