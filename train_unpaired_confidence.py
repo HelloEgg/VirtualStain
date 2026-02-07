@@ -92,7 +92,8 @@ class UnpairedConfidenceOptions(BaseOptions):
             load_size=256,
             crop_size=256,
             preprocess='resize_and_crop',
-            no_flip=False
+            no_flip=False,
+            phase='train'
         )
 
         return parser
