@@ -44,6 +44,10 @@ from models.unpaired_confidence import (
 class UnpairedConfidenceOptions(BaseOptions):
     """Options for unpaired confidence training."""
 
+    def __init__(self):
+        super().__init__()
+        self.isTrain = True
+
     def initialize(self, parser):
         parser = BaseOptions.initialize(self, parser)
 
