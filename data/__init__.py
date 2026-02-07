@@ -87,8 +87,10 @@ class CustomDatasetDataLoader():
         return self
 
     def __len__(self):
-        """Return the number of data in the dataset"""
-        return min(len(self.dataset), self.opt.max_dataset_size)
+        """Return the number of batches in the dataset"""
+        num_samples = min(len(self.dataset), self.opt.max_dataset_size)
+        # Return number of batches for correct tqdm display
+        return (num_samples + self.opt.batch_size - 1) // self.opt.batch_size
 
     def __iter__(self):
         """Return a batch of data"""
