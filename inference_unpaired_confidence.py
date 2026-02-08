@@ -40,7 +40,7 @@ from models.unpaired_confidence import (
 
 def save_image(tensor, path):
     """Save tensor as image."""
-    img = (tensor.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2 * 255
+    img = (tensor.squeeze().cpu().detach().numpy().transpose(1, 2, 0) + 1) / 2 * 255
     img = np.clip(img, 0, 255).astype(np.uint8)
     Image.fromarray(img).save(path)
 
@@ -49,7 +49,7 @@ def save_heatmap(tensor, path, cmap='RdYlGn', vmin=0, vmax=1):
     """Save tensor as heatmap."""
     import matplotlib.cm as cm
 
-    arr = tensor.squeeze().cpu().numpy()
+    arr = tensor.squeeze().cpu().detach().numpy()
     cmap_fn = cm.get_cmap(cmap)
     colored = cmap_fn((arr - vmin) / (vmax - vmin + 1e-6))[:, :, :3]
     colored = (colored * 255).astype(np.uint8)
@@ -64,10 +64,10 @@ def create_visualization(
 
     # Helper functions
     def to_img(t):
-        return np.clip((t.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+        return np.clip((t.squeeze().cpu().detach().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
 
     def to_map(t):
-        return t.squeeze().cpu().numpy()
+        return t.squeeze().cpu().detach().numpy()
 
     # Row 1: Images
     axes[0, 0].imshow(to_img(he_input))
@@ -241,13 +241,13 @@ class UnpairedConfidenceInference:
 
         self.color_deconv = ColorDeconvolution()
 
+    @torch.no_grad()
     def process(self, he_input, use_mc_dropout=True, mc_samples=10):
         """Process single image with confidence estimation."""
         he_input = he_input.to(self.device)
 
-        with torch.no_grad():
-            # Generate IHC
-            generated_ihc = self.generator_model.netG_A(he_input, layers=[])
+        # Generate IHC
+        generated_ihc = self.generator_model.netG_A(he_input, layers=[])
 
         # Compute confidence
         results = self.estimator.compute_confidence(
@@ -305,7 +305,7 @@ def main():
     gen_opt.ngf = 64
     gen_opt.netG = 'resnet_9blocks'
     gen_opt.normG = 'instance'
-    gen_opt.no_dropout = False  # Need dropout for MC
+    gen_opt.no_dropout = True  # Set False to enable MC Dropout variance estimation
     gen_opt.init_type = 'normal'
     gen_opt.init_gain = 0.02
     gen_opt.no_antialias = False
@@ -378,7 +378,7 @@ def main():
         confidence = results['confidence_combined']
 
         # Statistics
-        conf_np = confidence.squeeze().cpu().numpy()
+        conf_np = confidence.squeeze().cpu().detach().numpy()
         coverage = (conf_np >= args.confidence_threshold).mean()
         mean_conf = conf_np.mean()
 
@@ -394,7 +394,7 @@ def main():
         save_heatmap(confidence, os.path.join(output_dir, 'confidence_maps', f'{img_name}_conf.png'))
 
         # Create overlay
-        output_np = (generated_ihc.squeeze().cpu().numpy().transpose(1, 2, 0) + 1) / 2
+        output_np = (generated_ihc.squeeze().cpu().detach().numpy().transpose(1, 2, 0) + 1) / 2
         mask = conf_np >= args.confidence_threshold
         overlay = output_np.copy()
         overlay[~mask] = overlay[~mask] * 0.5 + np.array([1, 0, 0]) * 0.5
