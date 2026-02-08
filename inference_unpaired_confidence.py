@@ -310,6 +310,7 @@ def main():
     gen_opt.init_gain = 0.02
     gen_opt.no_antialias = False
     gen_opt.no_antialias_up = False
+    gen_opt.weight_norm = 'none'
     gen_opt.load_size = args.load_size
     gen_opt.crop_size = args.crop_size
     gen_opt.preprocess = 'resize_and_crop'
