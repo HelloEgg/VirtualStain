@@ -1,226 +1,119 @@
-# Confidence-Aware Virtual Staining
+# VirtualStain
 
-Code for the VirtualStain JBHI manuscript.
+Code for H&E <-> IHC virtual staining from the VirtualStain JBHI manuscript.
 
-This repository contains the remaining manuscript-related code for H&E-to-IHC virtual staining with confidence estimation. The original AdaptiveSupervisedPatchNCE / PatchNCE / CUT training code has been removed.
+This repository keeps only the unpaired image-to-image generation pipeline described in the manuscript method.
 
-## What Is Included
+## Method Components
 
-- Bidirectional H&E <-> IHC virtual staining
-- Cycle-consistency confidence maps
-- Stain-predictor and hallucination-detector confidence for weakly aligned or serial-section data
-- Learned error-predictor confidence
-- Risk-coverage, calibration, and confidence visualization scripts
+- Cycle-consistent H&E <-> IHC generators with residual blocks, self-attention, and decoder skip connections
+- Multi-scale spectral-normalized discriminators for both H&E and IHC domains
+- HE_MIL_PPIE: multiple-instance H&E pathology information extractor using 9 random 96 x 96 crops
+- Weakly supervised IHC classifier trained from DAB-intensity labels
+- Pathology consistency loss between HE_MIL_PPIE predictions and generated-IHC classifier predictions
+- Confusion discriminator that compares one generated IHC image against real IHC candidates
+- Nuclei/topology preservation loss using stain-specific nuclei maps
 
 ## Environment
 
-```bash
+```powershell
 conda env create -f environment.yml
 conda activate virtual_stain
 ```
 
-If your environment is missing optional visualization packages:
+If optional visualization packages are missing:
 
-```bash
-pip install matplotlib seaborn tqdm dominate
+```powershell
+pip install dominate visdom tqdm pillow
 ```
 
 ## Dataset Layout
 
-Set `--dataroot` to a folder with domain A as H&E and domain B as IHC.
-
-For paired or approximately aligned data, use:
+Use domain A for H&E and domain B for IHC. Training is unpaired, so filenames do not need to match.
 
 ```text
-datasets/YourDataset/
-  trainA/   # H&E training patches
-  trainB/   # IHC training patches
-  valA/     # H&E validation patches
-  valB/     # IHC validation patches
-  testA/    # H&E test patches
-  testB/    # IHC test patches, if available
+datasets/VirtualStain/
+  trainA/   H&E training patches
+  trainB/   IHC training patches
+  valA/     H&E validation patches
+  valB/     IHC validation patches
+  testA/    H&E test patches
+  testB/    IHC test patches, optional for single-domain inference
 ```
 
-For `--dataset_mode aligned`, each image in `trainA` must have the same relative filename in `trainB`. For example:
+For inference with only H&E images, you can point `--dataroot` directly at a folder of H&E images and use `--dataset_mode single`.
+
+## Train
+
+```powershell
+python .\train_virtual_stain.py `
+  --dataroot .\datasets\VirtualStain `
+  --name virtual_stain_he_ihc `
+  --model virtual_stain `
+  --dataset_mode unaligned `
+  --load_size 286 `
+  --crop_size 256 `
+  --batch_size 1 `
+  --display_id -1
+```
+
+Main manuscript loss weights are exposed as options:
 
 ```text
-trainA/case001_patch0001.png
-trainB/case001_patch0001.png
+--lambda_GAN 1
+--lambda_cycle 10
+--lambda_identity 5
+--lambda_patho 1
+--lambda_topo 1
+--lambda_confusion 1
 ```
 
-The same rule applies to `valA`/`valB` and `testA`/`testB`. If `testA` is absent but `valA` exists, the loader falls back to `valA`/`valB` for test phase.
-
-For serial-section or unpaired confidence experiments, the confidence-module training scripts can use:
-
-```bash
---dataset_mode unaligned
-```
-
-In that mode, `trainA` contains H&E patches and `trainB` contains IHC patches from the same dataset distribution, but filenames do not need to match.
-
-## Step 1: Train The Virtual Staining Generator
-
-This trains the bidirectional H&E <-> IHC model and saves checkpoints under `checkpoints/confidence_her2`.
-
-```bash
-python train_confidence.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --name confidence_her2 \
-  --model confidence \
-  --dataset_mode aligned \
-  --direction AtoB \
-  --netG resnet_6blocks \
-  --netD n_layers \
-  --load_size 1024 \
-  --crop_size 512 \
-  --preprocess crop \
-  --lambda_cycle 10.0 \
-  --lambda_cycle_B 10.0 \
-  --lambda_gp 10.0 \
-  --confidence_mode cycle_l1
-```
-
-For CPU-only smoke tests, add:
-
-```bash
---gpu_ids -1 --load_size 256 --crop_size 256 --n_epochs 1 --n_epochs_decay 0
-```
-
-## Step 2: Run Basic Confidence Inference
-
-This generates synthesized IHC images, confidence maps, overlays, and a summary under `results/`.
-
-```bash
-python inference_confidence.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --name confidence_her2 \
-  --model confidence \
-  --phase test \
-  --epoch latest \
-  --confidence_mode cycle_l1 \
-  --confidence_threshold 0.5 \
-  --save_confidence_overlay
-```
-
-Useful confidence modes:
-
-```text
-cycle_l1
-cycle_l2
-variance
-worst_case
-mc_dropout
-discriminator
-ensemble
-```
-
-## Step 3: Train Optional Confidence Modules
-
-Use this when H&E and IHC are weakly aligned or serial sections. It trains a brown-intensity predictor and hallucination detector using a frozen generator.
-
-```bash
-python train_unpaired_confidence.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --name unpaired_confidence_her2 \
-  --dataset_mode unaligned \
-  --n_epochs 50
-```
-
-Then run inference with those confidence modules:
-
-```bash
-python inference_unpaired_confidence.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --confidence_name unpaired_confidence_her2 \
-  --phase test \
-  --confidence_threshold 0.5
-```
-
-## Step 4: Train Optional Error Predictor
-
-Use this when paired or approximately aligned ground truth IHC is available during training. The predictor learns where the generator tends to make errors.
-
-```bash
-python train_error_predictor.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --name error_predictor_her2 \
-  --dataset_mode aligned \
-  --n_epochs 50
-```
-
-Then run inference with learned error confidence:
-
-```bash
-python inference_with_error_predictor.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --predictor_name error_predictor_her2 \
-  --phase test \
-  --confidence_threshold 0.5
-```
-
-## Evaluation And Figures
-
-Evaluate confidence quality and selective prediction metrics:
-
-```bash
-python evaluate_confidence.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --name confidence_her2 \
-  --model confidence \
-  --phase test \
-  --epoch latest
-```
-
-Compare cycle confidence against stain-predictor confidence:
-
-```bash
-python evaluate_cycle_vs_stain.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --confidence_name unpaired_confidence_her2 \
-  --phase test
-```
-
-Generate manuscript-style visualizations:
-
-```bash
-python visualize_cycle_vs_stain.py \
-  --dataroot ./datasets/MIST/HER2/TrainValAB \
-  --generator_name confidence_her2 \
-  --confidence_name unpaired_confidence_her2 \
-  --phase test
-```
-
-## Outputs
-
-Training checkpoints:
+Checkpoints are saved under:
 
 ```text
 checkpoints/<experiment_name>/
 ```
 
-Inference outputs:
+## Inference
+
+For a dataset with `testA/`:
+
+```powershell
+python .\inference_virtual_stain.py `
+  --dataroot .\datasets\VirtualStain `
+  --name virtual_stain_he_ihc `
+  --model virtual_stain `
+  --dataset_mode single `
+  --phase test `
+  --epoch latest `
+  --num_test 100 `
+  --eval
+```
+
+For a folder that directly contains H&E images:
+
+```powershell
+python .\inference_virtual_stain.py `
+  --dataroot .\datasets\VirtualStain\testA `
+  --name virtual_stain_he_ihc `
+  --model virtual_stain `
+  --dataset_mode single `
+  --epoch latest `
+  --num_test 100 `
+  --eval
+```
+
+Outputs are saved under:
 
 ```text
-results/<experiment_name>/
-  outputs/
-  confidence_maps/
-  visualizations/
-  overlays/
+results/<experiment_name>/<phase>_<epoch>/
+  fake_IHC/
+  reconstructed_HE/
 ```
 
-## Quick Sanity Check
+## Quick Checks
 
-Before launching a long training run:
-
-```bash
-python train_confidence.py --help
-python inference_confidence.py --help
-python evaluate_confidence.py --help
+```powershell
+python .\train_virtual_stain.py --help
+python .\inference_virtual_stain.py --help
 ```
-
-If those commands work and your dataset folders match the layout above, the repository is ready for experiments.

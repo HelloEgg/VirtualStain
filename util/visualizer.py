@@ -3,7 +3,7 @@ import os
 import sys
 import ntpath
 import time
-from . import util, html
+from . import util
 from subprocess import Popen, PIPE
 
 if sys.version_info[0] == 2:
@@ -82,6 +82,8 @@ class Visualizer():
                 self.create_visdom_connections()
 
         if self.use_html:  # create an HTML object at <checkpoints_dir>/web/; images will be saved under <checkpoints_dir>/web/images/
+            from . import html
+            self.html = html
             self.web_dir = os.path.join(opt.checkpoints_dir, opt.name, 'web')
             self.img_dir = os.path.join(self.web_dir, 'images')
             print('create web directory %s...' % self.web_dir)
@@ -174,7 +176,7 @@ class Visualizer():
                 util.save_image(image_numpy, img_path)
 
             # update website
-            webpage = html.HTML(self.web_dir, 'Experiment name = %s' % self.name, refresh=0)
+            webpage = self.html.HTML(self.web_dir, 'Experiment name = %s' % self.name, refresh=0)
             for n in range(epoch, 0, -1):
                 webpage.add_header('epoch [%d]' % n)
                 ims, txts, links = [], [], []
