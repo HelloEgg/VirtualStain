@@ -23,7 +23,6 @@ class Launcher(TmuxLauncher):
 
                 # Model configuration
                 model='confidence',  # Use our confidence-aware model
-                CUT_mode="FastCUT",
 
                 # Training schedule
                 n_epochs=30,  # Initial learning rate epochs
@@ -39,12 +38,8 @@ class Launcher(TmuxLauncher):
                 weight_norm='spectral',
                 n_downsampling=2,
 
-                # GAN and NCE loss weights
+                # GAN loss weight
                 lambda_GAN=1.0,
-                lambda_NCE=10.0,
-                nce_layers='0,4,8,12,16',
-                nce_T=0.07,
-                num_patches=256,
 
                 # Cycle consistency loss weights
                 lambda_cycle=10.0,  # Forward cycle: H&E -> IHC -> H&E
@@ -53,10 +48,6 @@ class Launcher(TmuxLauncher):
                 # Gaussian Pyramid loss
                 lambda_gp=10.0,
                 gp_weights='[0.015625,0.03125,0.0625,0.125,0.25,1.0]',
-
-                # ASP loss (for paired data)
-                lambda_asp=10.0,
-                asp_loss_mode='lambda_linear',
 
                 # Confidence estimation settings
                 confidence_mode='cycle_l1',  # Options: cycle_l1, cycle_l2, cycle_ssim, variance, worst_case
@@ -72,7 +63,6 @@ class Launcher(TmuxLauncher):
                 load_size=1024,
                 crop_size=512,
                 preprocess='crop',
-                flip_equivariance=False,
 
                 # Visualization and saving
                 display_winsize=512,
@@ -82,7 +72,7 @@ class Launcher(TmuxLauncher):
         ]
 
     def commands(self):
-        return ["python train.py " + str(opt) for opt in self.common_options()]
+        return ["python train_confidence.py " + str(opt) for opt in self.common_options()]
 
     def test_commands(self):
         """Generate test commands for evaluation with confidence maps."""
@@ -133,7 +123,6 @@ class ConfidenceAblationLauncher(TmuxLauncher):
             'dataroot': "datasets/MIST/HER2/TrainValAB",
             'checkpoints_dir': 'checkpoints',
             'model': 'confidence',
-            'CUT_mode': "FastCUT",
             'n_epochs': 30,
             'n_epochs_decay': 10,
             'netD': 'n_layers',
@@ -144,13 +133,10 @@ class ConfidenceAblationLauncher(TmuxLauncher):
             'normD': 'instance',
             'weight_norm': 'spectral',
             'lambda_GAN': 1.0,
-            'lambda_NCE': 10.0,
             'lambda_cycle': 10.0,
             'lambda_cycle_B': 10.0,
             'lambda_gp': 10.0,
             'gp_weights': '[0.015625,0.03125,0.0625,0.125,0.25,1.0]',
-            'lambda_asp': 10.0,
-            'asp_loss_mode': 'lambda_linear',
             'dataset_mode': 'aligned',
             'direction': 'AtoB',
             'num_threads': 15,
@@ -186,7 +172,7 @@ class ConfidenceAblationLauncher(TmuxLauncher):
         return options_list
 
     def commands(self):
-        return ["python train.py " + str(opt) for opt in self.common_options()]
+        return ["python train_confidence.py " + str(opt) for opt in self.common_options()]
 
 
 class MISTDatasetLauncher(TmuxLauncher):
@@ -199,7 +185,6 @@ class MISTDatasetLauncher(TmuxLauncher):
         base_opts = {
             'checkpoints_dir': 'checkpoints',
             'model': 'confidence',
-            'CUT_mode': "FastCUT",
             'n_epochs': 30,
             'n_epochs_decay': 10,
             'netD': 'n_layers',
@@ -210,13 +195,10 @@ class MISTDatasetLauncher(TmuxLauncher):
             'normD': 'instance',
             'weight_norm': 'spectral',
             'lambda_GAN': 1.0,
-            'lambda_NCE': 10.0,
             'lambda_cycle': 10.0,
             'lambda_cycle_B': 10.0,
             'lambda_gp': 10.0,
             'gp_weights': '[0.015625,0.03125,0.0625,0.125,0.25,1.0]',
-            'lambda_asp': 10.0,
-            'asp_loss_mode': 'lambda_linear',
             'confidence_mode': 'worst_case',
             'num_latent_samples': 5,
             'dataset_mode': 'aligned',
@@ -243,7 +225,7 @@ class MISTDatasetLauncher(TmuxLauncher):
         return options_list
 
     def commands(self):
-        return ["python train.py " + str(opt) for opt in self.common_options()]
+        return ["python train_confidence.py " + str(opt) for opt in self.common_options()]
 
 
 if __name__ == "__main__":

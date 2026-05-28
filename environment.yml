@@ -1,4 +1,4 @@
-name: ASP
+name: virtual_stain
 channels:
 - pytorch
 - conda-forge

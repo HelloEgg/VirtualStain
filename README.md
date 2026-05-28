@@ -1,59 +1,226 @@
-# Adaptive Supervised PatchNCE Loss for Learning H&E-to-IHC Stain Translation with Inconsistent Groundtruth Image Pairs (MICCAI 2023)
-### Fangda Li, Zhiqiang Hu, Wen Chen, Avinash Kak
-**For inquries, please open an issue or contact me at lifangda02@gmail.com.**
+# Confidence-Aware Virtual Staining
 
-<br>
-<p align="center">
-<img src="asp.png" align="center" width="600" >
-</p>
-<br>
+Code for the VirtualStain JBHI manuscript.
 
-> Immunohistochemical (IHC) staining highlights the molecular information critical to diagnostics in tissue samples. However, compared to H&E staining, IHC staining can be much more expensive in terms of both labor and the laboratory equipment required. This motivates recent research that demonstrates that the correlations between the morphological information present in the H&E-stained slides and the molecular information in the IHC-stained slides can be used for H&E-to-IHC stain translation. However, due to a lack of pixel-perfect H&E-IHC groundtruth pairs, most existing methods have resorted to relying on expert annotations. To remedy this situation, we present a new loss function, Adaptive Supervised PatchNCE (ASP), to directly deal with the input to target inconsistencies in a proposed H&E-to-IHC image-to-image translation framework. The ASP loss is built upon a patch-based contrastive learning criterion, named Supervised PatchNCE (SP), and augments it further with weight scheduling to mitigate the negative impact of noisy supervision. Lastly, we introduce the Multi-IHC Stain Translation (MIST) dataset, which contains aligned H&E-IHC patches for 4 different IHC stains critical to breast cancer diagnosis. In our experiment, we demonstrate that our proposed method outperforms existing image-to-image translation methods for stain translation to multiple IHC stains.
+This repository contains the remaining manuscript-related code for H&E-to-IHC virtual staining with confidence estimation. The original AdaptiveSupervisedPatchNCE / PatchNCE / CUT training code has been removed.
 
-## Downloading the MIST Dataset
-The full dataset can be accessed from [Google Drive](https://drive.google.com/drive/folders/146V99Zv1LzoHFYlXvSDhKmflIL-joo6p?usp=sharing) and [Baidu Cloud](https://pan.baidu.com/s/1wWlt6tUv4u8bMWU99dj-5g) (code: 6pme).
+## What Is Included
 
-The MIST dataset contains the following numbers of 1024x1024 H&E-IHC patch pairs at 0.4661 micron-per-pixel or 20X:
-- HER2: 4642 training and 1000 testing from 64 WSIs
-- Ki67: 4361 training and 1000 testing from 56 WSIs
-- ER: 4153 training and 1000 testing from 56 WSIs
-- PR: 4139 training and 1000 testing from 56 WSIs
+- Bidirectional H&E <-> IHC virtual staining
+- Cycle-consistency confidence maps
+- Stain-predictor and hallucination-detector confidence for weakly aligned or serial-section data
+- Learned error-predictor confidence
+- Risk-coverage, calibration, and confidence visualization scripts
 
-H&E-to-IHC stain translation results on the MIST images can be found in our [paper](https://arxiv.org/abs/2303.06193).
+## Environment
 
-## Requirements
-Clone this repo then install the dependencies using:
 ```bash
 conda env create -f environment.yml
+conda activate virtual_stain
 ```
-Note that we used `pytorch==1.12.1` and a RTX3090 GPU for all experiments.
 
-## Training from Scratch
-We use `experiments/mist_launcher.py` to generate the command line arguments for training and testing. More details on the parameters used in training our models can be found in that launcher file.
+If your environment is missing optional visualization packages:
 
-To train a model from scratch on the MIST dataset:
 ```bash
-python -m experiments mist train 0
+pip install matplotlib seaborn tqdm dominate
 ```
 
-## Testing and Evaluation
-Again the same `mist_launcher.py` can be used for testing:
+## Dataset Layout
+
+Set `--dataroot` to a folder with domain A as H&E and domain B as IHC.
+
+For paired or approximately aligned data, use:
+
+```text
+datasets/YourDataset/
+  trainA/   # H&E training patches
+  trainB/   # IHC training patches
+  valA/     # H&E validation patches
+  valB/     # IHC validation patches
+  testA/    # H&E test patches
+  testB/    # IHC test patches, if available
+```
+
+For `--dataset_mode aligned`, each image in `trainA` must have the same relative filename in `trainB`. For example:
+
+```text
+trainA/case001_patch0001.png
+trainB/case001_patch0001.png
+```
+
+The same rule applies to `valA`/`valB` and `testA`/`testB`. If `testA` is absent but `valA` exists, the loader falls back to `valA`/`valB` for test phase.
+
+For serial-section or unpaired confidence experiments, the confidence-module training scripts can use:
+
 ```bash
-python -m experiments mist test 0
+--dataset_mode unaligned
 ```
 
-We provide ASP-pretrained models on the BCI and our MIST dataset.
-The weights can be downloaded from [Google Drive](https://drive.google.com/drive/folders/11a3_4cyQY1bgBiRKnqtM7JGis5CPoVM6?usp=share_link).
-To use one of the provided models for testing, modify the `name` and `checkpoints` arguments in the launch option. 
-For example, to use `mist_her2_lambda_linear`:
+In that mode, `trainA` contains H&E patches and `trainB` contains IHC patches from the same dataset distribution, but filenames do not need to match.
+
+## Step 1: Train The Virtual Staining Generator
+
+This trains the bidirectional H&E <-> IHC model and saves checkpoints under `checkpoints/confidence_her2`.
+
+```bash
+python train_confidence.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --name confidence_her2 \
+  --model confidence \
+  --dataset_mode aligned \
+  --direction AtoB \
+  --netG resnet_6blocks \
+  --netD n_layers \
+  --load_size 1024 \
+  --crop_size 512 \
+  --preprocess crop \
+  --lambda_cycle 10.0 \
+  --lambda_cycle_B 10.0 \
+  --lambda_gp 10.0 \
+  --confidence_mode cycle_l1
 ```
-name="mist_her2_lambda_linear",
-checkpoints_dir='/path/to/pretrained/'
+
+For CPU-only smoke tests, add:
+
+```bash
+--gpu_ids -1 --load_size 256 --crop_size 256 --n_epochs 1 --n_epochs_decay 0
 ```
 
-The evaluation code that was used to generated the results in the paper is provided in `evaluate.py`.
+## Step 2: Run Basic Confidence Inference
 
-## Acknowledgement
-If you use this code or our MIST dataset for your research, please cite our [paper](https://arxiv.org/abs/2303.06193).
+This generates synthesized IHC images, confidence maps, overlays, and a summary under `results/`.
 
-This repo is built upon [Contrastive Unpaired Translation (CUT)](https://github.com/taesungp/contrastive-unpaired-translation).
+```bash
+python inference_confidence.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --name confidence_her2 \
+  --model confidence \
+  --phase test \
+  --epoch latest \
+  --confidence_mode cycle_l1 \
+  --confidence_threshold 0.5 \
+  --save_confidence_overlay
+```
+
+Useful confidence modes:
+
+```text
+cycle_l1
+cycle_l2
+variance
+worst_case
+mc_dropout
+discriminator
+ensemble
+```
+
+## Step 3: Train Optional Confidence Modules
+
+Use this when H&E and IHC are weakly aligned or serial sections. It trains a brown-intensity predictor and hallucination detector using a frozen generator.
+
+```bash
+python train_unpaired_confidence.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --name unpaired_confidence_her2 \
+  --dataset_mode unaligned \
+  --n_epochs 50
+```
+
+Then run inference with those confidence modules:
+
+```bash
+python inference_unpaired_confidence.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --confidence_name unpaired_confidence_her2 \
+  --phase test \
+  --confidence_threshold 0.5
+```
+
+## Step 4: Train Optional Error Predictor
+
+Use this when paired or approximately aligned ground truth IHC is available during training. The predictor learns where the generator tends to make errors.
+
+```bash
+python train_error_predictor.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --name error_predictor_her2 \
+  --dataset_mode aligned \
+  --n_epochs 50
+```
+
+Then run inference with learned error confidence:
+
+```bash
+python inference_with_error_predictor.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --predictor_name error_predictor_her2 \
+  --phase test \
+  --confidence_threshold 0.5
+```
+
+## Evaluation And Figures
+
+Evaluate confidence quality and selective prediction metrics:
+
+```bash
+python evaluate_confidence.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --name confidence_her2 \
+  --model confidence \
+  --phase test \
+  --epoch latest
+```
+
+Compare cycle confidence against stain-predictor confidence:
+
+```bash
+python evaluate_cycle_vs_stain.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --confidence_name unpaired_confidence_her2 \
+  --phase test
+```
+
+Generate manuscript-style visualizations:
+
+```bash
+python visualize_cycle_vs_stain.py \
+  --dataroot ./datasets/MIST/HER2/TrainValAB \
+  --generator_name confidence_her2 \
+  --confidence_name unpaired_confidence_her2 \
+  --phase test
+```
+
+## Outputs
+
+Training checkpoints:
+
+```text
+checkpoints/<experiment_name>/
+```
+
+Inference outputs:
+
+```text
+results/<experiment_name>/
+  outputs/
+  confidence_maps/
+  visualizations/
+  overlays/
+```
+
+## Quick Sanity Check
+
+Before launching a long training run:
+
+```bash
+python train_confidence.py --help
+python inference_confidence.py --help
+python evaluate_confidence.py --help
+```
+
+If those commands work and your dataset folders match the layout above, the repository is ready for experiments.

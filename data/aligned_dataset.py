@@ -70,7 +70,7 @@ class AlignedDataset(BaseDataset):
         B_img = Image.open(B_path).convert('RGB')
 
         # Apply image transformation
-        # For CUT/FastCUT mode, if in finetuning phase (learning rate is decaying),
+        # During finetuning, synchronize stochastic transforms for paired patches.
         # do not perform resize-crop data augmentation of CycleGAN.
         is_finetuning = self.opt.isTrain and self.current_epoch > self.opt.n_epochs
         modified_opt = util.copyconf(self.opt, load_size=self.opt.crop_size if is_finetuning else self.opt.load_size)

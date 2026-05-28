@@ -12,15 +12,12 @@ Key Components:
 Reference: "Confidence-Aware Virtual Staining: Knowing What We Don't Know"
 """
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .base_model import BaseModel
 from . import networks
-from .patchnce import PatchNCELoss
-from .asp_loss import AdaptiveSupervisedPatchNCELoss
 from .gauss_pyramid import Gauss_Pyramid_Conv
 import util.util as util
 
@@ -42,26 +39,12 @@ class ConfidenceModel(BaseModel):
     @staticmethod
     def modify_commandline_options(parser, is_train=True):
         """Add model-specific options"""
-        # Inherit from CPT options
-        parser.add_argument('--CUT_mode', type=str, default="CUT", choices='(CUT, cut, FastCUT, fastcut)')
         parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss')
-        parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss')
-        parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=False)
-        parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16')
-        parser.add_argument('--nce_includes_all_negatives_from_minibatch',
-                            type=util.str2bool, nargs='?', const=True, default=False)
-        parser.add_argument('--netF', type=str, default='mlp_sample', choices=['sample', 'reshape', 'mlp_sample'])
-        parser.add_argument('--netF_nc', type=int, default=256)
-        parser.add_argument('--nce_T', type=float, default=0.07)
-        parser.add_argument('--num_patches', type=int, default=256)
-        parser.add_argument('--flip_equivariance', type=util.str2bool, nargs='?', const=True, default=False)
         parser.set_defaults(pool_size=0, dataset_mode='aligned')  # Use aligned for paired H&E-IHC
 
-        # Gaussian Pyramid and ASP options
+        # Multi-scale reconstruction options
         parser.add_argument('--lambda_gp', type=float, default=1.0)
         parser.add_argument('--gp_weights', type=str, default='uniform')
-        parser.add_argument('--lambda_asp', type=float, default=0.0)
-        parser.add_argument('--asp_loss_mode', type=str, default='none')
         parser.add_argument('--n_downsampling', type=int, default=2)
 
         # Confidence-specific options
@@ -86,30 +69,20 @@ class ConfidenceModel(BaseModel):
         parser.add_argument('--load_discriminator', action='store_true',
                             help='load discriminator for confidence estimation (test mode)')
 
-        opt, _ = parser.parse_known_args()
-
-        if opt.CUT_mode.lower() == "cut":
-            parser.set_defaults(nce_idt=True, lambda_NCE=1.0)
-        elif opt.CUT_mode.lower() == "fastcut":
-            parser.set_defaults(nce_idt=False, lambda_NCE=10.0, flip_equivariance=False,
-                                n_epochs=20, n_epochs_decay=10)
-
         return parser
 
     def __init__(self, opt):
         BaseModel.__init__(self, opt)
 
         # Loss names for logging
-        self.loss_names = ['G_A', 'G_B', 'D_A', 'D_B', 'cycle_A', 'cycle_B', 'NCE_A', 'NCE_B']
+        self.loss_names = ['G_A', 'G_B', 'D_A', 'D_B', 'cycle_A', 'cycle_B']
 
         # Visual names
         self.visual_names = ['real_A', 'fake_B', 'rec_A', 'real_B', 'fake_A', 'rec_B',
                              'confidence_map_A', 'confidence_map_B']
 
-        self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
-
         if self.isTrain:
-            self.model_names = ['G_A', 'G_B', 'F_A', 'F_B', 'D_A', 'D_B']
+            self.model_names = ['G_A', 'G_B', 'D_A', 'D_B']
         else:
             # Load discriminators for discriminator-based confidence estimation
             if opt.confidence_mode == 'discriminator' or opt.load_discriminator:
@@ -129,14 +102,6 @@ class ConfidenceModel(BaseModel):
                                          opt.init_gain, opt.no_antialias, opt.no_antialias_up,
                                          self.gpu_ids, opt)
 
-        # Feature networks for NCE loss
-        self.netF_A = networks.define_F(opt.input_nc, opt.netF, opt.normG, not opt.no_dropout,
-                                         opt.init_type, opt.init_gain, opt.no_antialias,
-                                         self.gpu_ids, opt)
-        self.netF_B = networks.define_F(opt.output_nc, opt.netF, opt.normG, not opt.no_dropout,
-                                         opt.init_type, opt.init_gain, opt.no_antialias,
-                                         self.gpu_ids, opt)
-
         # Define discriminators for training or for discriminator-based confidence
         if self.isTrain or opt.confidence_mode == 'discriminator' or opt.load_discriminator:
             # Discriminators
@@ -150,7 +115,6 @@ class ConfidenceModel(BaseModel):
         if self.isTrain:
             # Loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)
-            self.criterionNCE = PatchNCELoss(opt).to(self.device)
             self.criterionCycle = nn.L1Loss()
             self.criterionIdt = nn.L1Loss()
 
@@ -174,11 +138,6 @@ class ConfidenceModel(BaseModel):
                     self.gp_weights = eval(self.opt.gp_weights)
                 self.loss_names += ['GP_A', 'GP_B']
 
-            # ASP loss
-            if self.opt.lambda_asp > 0:
-                self.criterionASP = AdaptiveSupervisedPatchNCELoss(self.opt).to(self.device)
-                self.loss_names += ['ASP_A', 'ASP_B']
-
         # Initialize confidence maps
         self.confidence_map_A = None
         self.confidence_map_B = None
@@ -194,13 +153,6 @@ class ConfidenceModel(BaseModel):
         if self.opt.isTrain:
             self.compute_D_loss().backward()
             self.compute_G_loss().backward()
-
-            # Initialize F network optimizers
-            if self.opt.lambda_NCE > 0.0:
-                self.optimizer_F = torch.optim.Adam(
-                    list(self.netF_A.parameters()) + list(self.netF_B.parameters()),
-                    lr=self.opt.lr, betas=(self.opt.beta1, self.opt.beta2))
-                self.optimizers.append(self.optimizer_F)
 
     def set_input(self, input):
         """Unpack input data"""
@@ -539,14 +491,6 @@ class ConfidenceModel(BaseModel):
         self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * self.opt.lambda_cycle
         self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * self.opt.lambda_cycle_B
 
-        # NCE losses for both directions
-        if self.opt.lambda_NCE > 0.0:
-            self.loss_NCE_A = self.calculate_NCE_loss(self.real_A, self.fake_B, self.netG_A, self.netF_A)
-            self.loss_NCE_B = self.calculate_NCE_loss(self.real_B, self.fake_A, self.netG_B, self.netF_B)
-        else:
-            self.loss_NCE_A = 0.0
-            self.loss_NCE_B = 0.0
-
         # Gaussian Pyramid losses
         if self.opt.lambda_gp > 0:
             self.loss_GP_A = self._compute_gp_loss(self.fake_B, self.real_B)
@@ -555,37 +499,12 @@ class ConfidenceModel(BaseModel):
             self.loss_GP_A = 0.0
             self.loss_GP_B = 0.0
 
-        # ASP losses
-        if self.opt.lambda_asp > 0:
-            self.loss_ASP_A = self._compute_asp_loss(self.real_B, self.fake_B, self.netG_A, self.netF_A)
-            self.loss_ASP_B = self._compute_asp_loss(self.real_A, self.fake_A, self.netG_B, self.netF_B)
-        else:
-            self.loss_ASP_A = 0.0
-            self.loss_ASP_B = 0.0
-
         # Total loss
         self.loss_G = (self.loss_G_A + self.loss_G_B +
                        self.loss_cycle_A + self.loss_cycle_B +
-                       self.loss_NCE_A + self.loss_NCE_B +
-                       self.loss_GP_A + self.loss_GP_B +
-                       self.loss_ASP_A + self.loss_ASP_B)
+                       self.loss_GP_A + self.loss_GP_B)
 
         return self.loss_G
-
-    def calculate_NCE_loss(self, src, tgt, netG, netF):
-        """Calculate NCE loss for content preservation"""
-        feat_src = netG(src, self.nce_layers, encode_only=True)
-        feat_tgt = netG(tgt, self.nce_layers, encode_only=True)
-
-        feat_k_pool, sample_ids = netF(feat_src, self.opt.num_patches, None)
-        feat_q_pool, _ = netF(feat_tgt, self.opt.num_patches, sample_ids)
-
-        total_nce_loss = 0.0
-        for f_q, f_k in zip(feat_q_pool, feat_k_pool):
-            loss = self.criterionNCE(f_q, f_k) * self.opt.lambda_NCE
-            total_nce_loss += loss.mean()
-
-        return total_nce_loss / len(feat_src)
 
     def _compute_gp_loss(self, fake, real):
         """Compute Gaussian Pyramid reconstruction loss"""
@@ -594,21 +513,6 @@ class ConfidenceModel(BaseModel):
         loss_pyramid = [self.criterionGP(pf, pr) for pf, pr in zip(p_fake, p_real)]
         loss_pyramid = [l * w for l, w in zip(loss_pyramid, self.gp_weights)]
         return torch.mean(torch.stack(loss_pyramid)) * self.opt.lambda_gp
-
-    def _compute_asp_loss(self, real, fake, netG, netF):
-        """Compute Adaptive Supervised PatchNCE loss"""
-        feat_real = netG(real, self.nce_layers, encode_only=True)
-        feat_fake = netG(fake, self.nce_layers, encode_only=True)
-
-        feat_k_pool, sample_ids = netF(feat_real, self.opt.num_patches, None)
-        feat_q_pool, _ = netF(feat_fake, self.opt.num_patches, sample_ids)
-
-        total_asp_loss = 0.0
-        for f_q, f_k in zip(feat_q_pool, feat_k_pool):
-            loss = self.criterionASP(f_q, f_k, self.current_epoch) * self.opt.lambda_asp
-            total_asp_loss += loss.mean()
-
-        return total_asp_loss / len(feat_real)
 
     def optimize_parameters(self):
         """Optimize generator and discriminator parameters"""
@@ -625,13 +529,9 @@ class ConfidenceModel(BaseModel):
         # Update generators
         self.set_requires_grad([self.netD_A, self.netD_B], False)
         self.optimizer_G.zero_grad()
-        if hasattr(self, 'optimizer_F'):
-            self.optimizer_F.zero_grad()
         self.loss_G = self.compute_G_loss()
         self.loss_G.backward()
         self.optimizer_G.step()
-        if hasattr(self, 'optimizer_F'):
-            self.optimizer_F.step()
 
     def get_current_visuals(self):
         """Return visualization images including confidence maps"""

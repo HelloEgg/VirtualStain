@@ -43,7 +43,6 @@ from models.error_predictor import (
     DualInputErrorPredictor,
     define_error_predictor
 )
-from util.visualizer import Visualizer
 import util.util as util
 
 

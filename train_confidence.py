@@ -8,7 +8,6 @@ Key Features:
 1. Bidirectional generators (H&E->IHC and IHC->H&E)
 2. Cycle consistency loss for confidence estimation
 3. Multi-scale Gaussian pyramid reconstruction loss
-4. Adaptive Supervised PatchNCE loss
 
 Usage:
     python train_confidence.py \
@@ -29,7 +28,6 @@ import torch
 from options.train_options import TrainOptions
 from data import create_dataset
 from models import create_model
-from util.visualizer import Visualizer
 
 
 def train():
@@ -52,6 +50,7 @@ def train():
     model.setup(opt)
 
     # Create visualizer
+    from util.visualizer import Visualizer
     visualizer = Visualizer(opt)
 
     # Total iterations counter

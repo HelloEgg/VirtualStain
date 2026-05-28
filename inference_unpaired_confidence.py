@@ -325,9 +325,6 @@ def main():
     gen_opt.verbose = False
     gen_opt.confidence_mode = 'cycle_l1'
     gen_opt.load_discriminator = False
-    gen_opt.nce_layers = '0,4,8,12,16'
-    gen_opt.netF = 'mlp_sample'
-    gen_opt.netF_nc = 256
 
     # Create inference engine
     confidence_dir = os.path.join(args.checkpoints_dir, args.confidence_name)

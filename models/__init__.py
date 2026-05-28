@@ -54,8 +54,7 @@ def get_option_setter(model_name):
 def create_model(opt):
     """Create a model given the option.
 
-    This function warps the class CustomDatasetDataLoader.
-    This is the main interface between this package and 'train.py'/'test.py'
+    This is the main interface between this package and the training/inference scripts.
 
     Example:
         >>> from models import create_model
